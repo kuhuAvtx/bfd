@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math/rand"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -55,6 +56,8 @@ type Peer struct {
 	updater    chan *mgmtOp
 
 	watchers []*watcher
+
+	EchoRxInterval uint32
 }
 
 type mgmtOp struct {
@@ -86,7 +89,8 @@ func NewPeer(address net.IP, port int) (*Peer, error) {
 		ticker: time.NewTimer(time.Duration(5) * time.Hour),
 		expiry: time.NewTimer(time.Duration(5) * time.Hour),
 
-		updater: make(chan *mgmtOp, 8),
+		updater:        make(chan *mgmtOp, 8),
+		EchoRxInterval: 0,
 	}
 
 	// Setup an initial state
@@ -121,8 +125,15 @@ func (p *Peer) NewPacket(poll bfd.Bool, final bfd.Bool) *bfd.ControlPacket {
 		YourDiscriminator:       remote.discriminator,
 		DesiredMinTxInterval:    local.desiredMinTxInterval,
 		RequiredMinRxInterval:   local.requiredMinRxInterval,
-		RequiredMinEchoInterval: 0,
+		RequiredMinEchoInterval: 1000,
 	}
+}
+
+func (p *Peer) setEchoInterval(interval uint32) {
+	p.Lock()
+	p.EchoRxInterval = interval
+	glog.Infof("KUHU peer.EchoRxInterval = %d\n", p.EchoRxInterval)
+	p.Unlock()
 }
 
 func (p *Peer) Send(packet *bfd.ControlPacket) error {
@@ -313,6 +324,27 @@ func (p *Peer) scheduleSend(interval uint32) {
 	p.Unlock()
 }
 
+func (p *Peer) sendEcho() {
+	glog.Infoln("KUHU sendEcho " + p.Address.IP.String())
+	sourcePort := 30000 + int(rand.Intn(49152-30000))
+	udpAddr := &net.UDPAddr{Port: sourcePort}
+	udpDestAddr := &net.UDPAddr{IP: p.Address.IP, Port: BFD_ECHO_PORT}
+	udpConn, err := net.DialUDP("udp", udpAddr, udpDestAddr)
+	if err != nil {
+		glog.Fatalln("Failure in echo udp", err)
+	}
+	timestamp := strconv.FormatInt(time.Now().UnixNano(), 10)
+	glog.Infof("Sent timestamp=%s\n", timestamp)
+	n, writeErr := udpConn.Write([]byte(timestamp))
+	if writeErr != nil {
+		glog.Fatalf("KUHU Write err %s , %d", writeErr.Error(), n)
+	}
+	if writeErr == nil {
+		glog.Infoln("KUHU SOME SUCCESS?")
+	}
+	defer udpConn.Close()
+}
+
 // handleUpdates handles all updates that need to be applied to the state of a peer
 func (p *Peer) handleUpdates() {
 	for {
@@ -372,6 +404,7 @@ func (peer *Peer) handle() {
 			}
 
 			peer.scheduleSend(sendInterval)
+			peer.sendEcho()
 
 		// expiry placed here, since it's 1 goroutine per neighbor
 		case <-peer.expiry.C:

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/golang/glog"
 	"golang.org/x/net/ipv4"
@@ -26,7 +27,8 @@ https://tools.ietf.org/html/rfc5881
 */
 
 const (
-	BFD_PORT = 3784
+	BFD_PORT      = 3784
+	BFD_ECHO_PORT = 3785
 )
 
 type BfdServer struct {
@@ -270,6 +272,7 @@ func (s *BfdServer) Listen(address string) error {
 	}
 
 	ip := net.ParseIP(host)
+	glog.Infof("KUHU LISTEN ONLY HOST IP=%s", ip)
 
 	if ip == nil {
 		return ErrInvalidIP
@@ -316,6 +319,56 @@ func (s *BfdServer) Listen(address string) error {
 	return nil
 }
 
+func (s *BfdServer) ListenEcho() error {
+	glog.Infoln("KUHU ListenEcho")
+	var addrStr string
+	intName, _ := net.InterfaceByName("eth0")
+	retAddrs, _ := intName.Addrs()
+	for _, addr := range retAddrs {
+		glog.Infoln("KUHU interface addr=" + addr.String())
+		parts := strings.Split(addr.String(), "/")
+		addrStr = parts[0]
+	}
+	addr := &net.UDPAddr{
+		IP:   net.ParseIP(addrStr),
+		Port: BFD_ECHO_PORT,
+	}
+	conn, err := net.ListenUDP("udp", addr)
+
+	if err != nil {
+		glog.Errorln("Kuhu Error in Listen UDP", err)
+		return err
+	}
+	go s.readEchoUdp(conn)
+	return nil
+}
+
+func (s *BfdServer) readEchoUdp(conn *net.UDPConn) error {
+	// glog.Infoln("KUHU reachEchoUdp , I am here!")
+	b := make([]byte, 19)
+	for {
+		// glog.Infof("KUHU reachEchoUdp FOR loop local=%s and remote=%s\n", conn.LocalAddr(), conn.RemoteAddr())
+		n, addr, err := conn.ReadFromUDP(b)
+		timeString := string(b)
+		glog.Infof("UDP reachEchoUdp String = %d, %s, %#v, %s\n", n, addr, err, timeString)
+		currTime := time.Now().UnixNano()
+		glog.Infof("Read time before parsing%s\n", timeString)
+		readTime, err := strconv.ParseInt(timeString, 10, 64)
+		if err != nil {
+			glog.Fatalln("KUHU str conv err =" + err.Error())
+		}
+		glog.Infof("Curr time=%d, ReadTime=%d\n", currTime, readTime)
+		latency := currTime - readTime
+		glog.Infof("Latency= %d\n", latency)
+		if err != nil {
+			glog.Errorf("KUHU ERROR reachEchoUdp%v", err)
+			return err
+		}
+	}
+	glog.Infoln("KUHU reachEchoUdp THE END")
+	return nil
+}
+
 func (s *BfdServer) Serve() error {
 	go s.handleIncomingBfdPacket()
 
@@ -326,8 +379,8 @@ func (s *BfdServer) Serve() error {
 			return err
 		}
 	}
-
-	return nil
+	echoErr := s.ListenEcho()
+	return echoErr
 }
 
 func (s *BfdServer) Shutdown() {
@@ -403,6 +456,7 @@ func (s *BfdServer) handlePacket(pkt packet) error {
 		return ErrPeerNotFound
 	}
 
+	peer.setEchoInterval(p.RequiredMinEchoInterval)
 	return peer.handlePacket(p)
 }
 
